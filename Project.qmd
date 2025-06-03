@@ -1,0 +1,712 @@
+---
+title: "STAT 5410 Final Project: Analysis of Area Codes"
+author: "Mohit Bhoir"
+format: 
+  html:
+    theme: cosmo           
+    toc: true             
+    toc-title: "Contents"
+    toc-depth: 1 
+    embed-resources: true
+    fig_caption: true      
+    highlight: tango      
+    code-line-numbers: true  
+    code-overflow: wrap    
+    keep-tex: true         
+fontsize: 12pt             
+linestretch: 1.5           
+geometry: "margin=1in"    
+linkcolor: blue
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+This project investigates the historical allocation of area codes under the 1947 North American Numbering Plan (NANP) to uncover whether the design of telecommunications infrastructure reflected systemic social and demographic biases. Using spatial joins, historical census data from the 1950s, and statistical modeling, we map original area code assignments to U.S. counties and analyze patterns based on population size, race, and geographic distribution. Our work reveals that more populous regions were often given easier-to-dial codes, and in high-density areas, codes serving predominantly Black populations were disproportionately harder to dial. We build predictive models to forecast future area code splits using mid-century demographic and infrastructural features. Our findings demonstrate how early decisions in telecommunications policy have left a measurable imprint on long-term service distribution and social equity—offering a data-driven lens on infrastructure fairness.
+
+# COMPONENT 1: Assigning Area Codes to Counties
+
+In Component 1, we assembled and joined multiple datasets to map each U.S. county to its original 3-digit area code, based on 1947 assignments. This involved:
+
+-   Cleaning census, area code, and shapefile data
+-   Performing spatial joins to identify counties for each city
+-   Assigning the most common original area code per county
+-   Visualizing this assignment for selected states
+
+```{r load-files, include=FALSE}
+# Load all Datasets
+library(ggplot2)
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(sf)
+library(dplyr)
+library(knitr)
+
+county_census <- read_csv("final_project_data/county_census_info.csv") |>
+  clean_names() |> rename( state = state_name, county = county_name,
+    state_fips = state_fips_code, county_fips = county_fips_code)
+#glimpse(county_census)
+
+merged_counties<-read_csv("final_project_data/merged_counties_since_1950.csv")|>
+  clean_names() |> rename(state = state_name,county = county_name)
+#glimpse(merged_counties)
+
+new_counties <- read_csv("final_project_data/new_counties_since_1950.csv") |>
+  clean_names() |> rename(county = new_county_name)
+#glimpse(new_counties)
+
+area_codes <- read_csv("final_project_data/cities_area_codes.csv") |>
+  clean_names() |> rename(state = state_or_province)
+#glimpse(area_codes)
+
+county_shapes <- st_read("final_project_data/co99_d00_shp/co99_d00.shp") |>
+  clean_names() |> rename(state_fips= state,county_fips = county,county = name)
+#glimpse(county_shapes)
+
+splits_path <- "final_project_data/splits_overlays.xlsx"
+splits_overlays_sheets <-excel_sheets("final_project_data/splits_overlays.xlsx")
+#print(splits_overlays_sheets)
+```
+
+```{r process-splits, echo=FALSE}
+# Combine all sheets into one dataframe
+splits_overlays_all <- splits_overlays_sheets |>
+  map_dfr( ~ read_excel(splits_path, sheet = .x) |>
+  clean_names() |>mutate(original_area_code = as.integer(.x)))
+#glimpse(splits_overlays_all)
+area_codes_original <- area_codes |> mutate(code = as.character(area_code)) |>
+  left_join(splits_overlays_all |>mutate(code = as.character(code)) |>
+  select(code, original_area_code),by = "code") |>
+  mutate(original_area_code = as.integer(original_area_code))
+# area_codes_original |> select(city, state, area_code, original_area_code) |>
+# glimpse()
+```
+
+```{r spatial-join, echo=FALSE}
+# Match cities to counties spatially
+area_codes_sf <- area_codes_original |>
+  filter(!is.na(latitude), !is.na(longitude)) |>
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE)
+
+county_shapes <- county_shapes |> st_set_crs(4269)
+county_shapes_transformed <- st_transform(county_shapes, st_crs(area_codes_sf))
+
+cities_with_counties <- st_join(area_codes_sf, 
+      county_shapes_transformed, left = FALSE)
+
+# Most common original area code per county
+county_area_codes <- cities_with_counties |>
+  st_drop_geometry() |>
+  group_by(state_fips, county_fips) |>
+  count(original_area_code, sort = TRUE) |>
+  slice_max(n, n = 1, with_ties = FALSE) |>
+  ungroup()
+
+# Join to shapefile
+county_shapes_with_area_code <- county_shapes |>
+  left_join(county_area_codes, by = c("state_fips", "county_fips"))
+county_map_data <- county_shapes_with_area_code |>
+  left_join(county_census |> select(state_fips, county_fips, state),
+            by = c("state_fips", "county_fips"))
+```
+
+```{r map-plot-function, message=FALSE}
+plot_state_map <- function(state_name) {
+  ggplot(
+    data = county_map_data |> filter(state == state_name),
+    aes(fill = as.factor(original_area_code))) +
+    geom_sf(color = "white", size = 0.1) +
+    scale_fill_discrete(name = "Area Code") +
+    labs(title = paste("Original Area Codes in", state_name)) +
+    theme_bw() + theme(legend.position = "right")
+}
+```
+
+```{r plot-state-maps, echo=FALSE, fig.cap="Original Area Codes for Selected States"}
+plot_state_map("CALIFORNIA")
+plot_state_map("NEW YORK")
+plot_state_map("TEXAS")
+plot_state_map("ILLINOIS")
+plot_state_map("KANSAS")
+plot_state_map("CONNECTICUT")
+```
+
+The maps show distinct patterns of original area code assignment across states. Urbanized states such as New York and California exhibit dense clusters of area codes, especially around major cities like New York City and Los Angeles. In contrast, rural states like Kansas have larger, more uniformly distributed area code zones. These visualizations not only confirm the success of my spatial join and aggregation process, but also closely match the historical area code maps provided in the reference links within the project prompt, further validating the accuracy of the implementation.
+
+------------------------------------------------------------------------
+
+# COMPONENT 2: Summarizing Regional Characteristics by Area Code
+
+In this component, we constructed a summary dataset for each original area code based on demographic, telephone, and geographic information from the 1940s–1950s. This data provides the foundation for later modeling and fairness analysis.
+
+Specifically, we:
+
+-   Aggregated census and area variables from the county to the area code level
+
+-   Calculated region-wide totals and ratios (e.g., birth rate, Black population proportion)
+
+-   Joined with descendant area code counts for future modeling
+
+```{r component2-summary, include=FALSE}
+# Join area back into county census
+county_area_km <- county_shapes |> 
+  st_drop_geometry() |>
+  group_by(state_fips, county_fips) |>
+  summarise(area = sum(area, na.rm = TRUE))
+
+county_census <- county_census |> 
+  left_join(county_area_km, by = c("state_fips", "county_fips"))
+```
+
+```{r build-area-summary, echo=TRUE, message=FALSE, warning=FALSE}
+area_code_summary <- county_census |>
+  left_join(county_area_codes, by = c("state_fips", "county_fips")) |>
+  filter(!is.na(original_area_code)) |>
+  group_by(original_area_code) |>
+  summarise(
+    state_name = first(state),
+    area = sum(area, na.rm = TRUE),
+    population_1950 = sum(population_1950, na.rm = TRUE),
+    residence_telephones_1945 = sum(residence_telephones_1945, na.rm = TRUE),
+    population_under5_1950 = sum(population_under5_1950, na.rm = TRUE),
+    population_over65_1950 = sum(population_over65_1950, na.rm = TRUE),
+    births = sum(births, na.rm = TRUE),
+    black_prop = sum(black_pop, na.rm= TRUE)/sum(population_1950, na.rm = TRUE)
+  )|>mutate( original_code = original_area_code,
+  middle_code = substr(as.character(original_area_code), 2,2)) |> ungroup()
+```
+
+```{r join-descendants, include=FALSE}
+descendant_counts <- splits_overlays_all |>
+  count(original_area_code) |> rename(n_descendants = n)
+
+area_code_summary <- area_code_summary |>
+  left_join(descendant_counts, by= c("original_code"="original_area_code")) |>
+  replace_na(list(n_descendants = 0))
+```
+
+We joined descendant counts to each original area code. Area codes that were split over time will show a higher number of descendants.
+
+```{r check-area-code-summary, echo=TRUE}
+# Check the summary
+area_code_summary |>
+  filter(middle_code == "1") |>
+  arrange(desc(population_1950)) |>
+  select(original_code, population_1950) |>
+  slice_head(n = 3)
+```
+
+```{r telephones-vs-pop, fig.cap="Residential Telephones vs. Population (1950)"}
+ggplot(area_code_summary, aes(x = population_1950, y = residence_telephones_1945)) +
+  geom_point(color = "steelblue", size = 3, alpha = 0.6) +
+  labs(title = "Residential Telephones vs Population (1950)",
+  x = "Population (1950)", y = "Residential Telephones (1945)") +
+  theme_bw()
+```
+
+There is a strong positive correlation between population size and the number of residential telephones in 1945.
+
+```{r black-population, fig.cap="Top 10 Area Codes by Black Population Proportion (1950)"}
+area_code_summary |>
+  slice_max(black_prop, n = 10) |>
+  ggplot(aes(x = reorder(as.character(original_code), black_prop), y = black_prop)) +
+  geom_col(fill = "darkred") + coord_flip() + labs(
+  title = "Top 10 Area Codes by Black Population Proportion (1950)",
+  x = "Original Area Code", y = "Proportion Black") + theme_bw()
+```
+
+This plot highlights the area codes with the highest proportions of Black residents in 1950, relevant to later fairness analyses.
+
+```{r births-by-middle-code, fig.cap="Distribution of Births by Middle Digit of Area Code"}
+area_code_summary |>
+  ggplot(aes(x = as.factor(middle_code), y = births)) +
+  geom_boxplot(fill = "lightblue") + labs(
+  title = "Distribution of Births by Middle Digit of Area Code",
+  x = "Middle Digit", y = "Total Births (1950)") + theme_bw()
+```
+
+This boxplot shows the distribution of births across area codes grouped by their middle digit. The middle digit of an area code can be a factor in dialing difficulty, and this plot provides insight into how birth rates may vary by area code assignment.
+
+------------------------------------------------------------------------
+
+# COMPONENT 3: Dialing Effort and Population – Stratified Analysis
+
+This component evaluates whether more populous areas were intentionally assigned area codes that required fewer rotary dial pulls, especially within states that had multiple area codes to choose from.
+
+We split states into:
+
+-   Multi-Code States (states assigned more than one area code in 1947)
+
+-   Single-Code States (states with only one assigned code)
+
+```{r compute-dial-pulls,echo=TRUE}
+dial_pulls_table <- tibble(digit = 0:9, pulls = c(10, 1:9))
+
+area_code_summary <- area_code_summary |> mutate(
+  digit1 = as.integer(substr(as.character(original_code), 1, 1)),
+  digit2 = as.integer(substr(as.character(original_code), 2, 2)),
+  digit3 = as.integer(substr(as.character(original_code), 3, 3))) |>
+  left_join(dial_pulls_table |> rename(pulls1 = pulls), 
+            by = c("digit1" = "digit")) |>
+  left_join(dial_pulls_table |> rename(pulls2 = pulls), 
+            by = c("digit2" = "digit")) |>
+  left_join(dial_pulls_table |> rename(pulls3 = pulls), 
+            by = c("digit3" = "digit")) |>
+  mutate(dial_pulls = pulls1 + pulls2 + pulls3)
+#view(area_code_summary)
+```
+
+We calculate the number of pulls needed to dial each area code on a rotary phone, summing the pulls across its three digits.
+
+```{r verify-sum ,echo=FALSE}
+cat("Total Population:", sum(area_code_summary$population_1950))
+cat("Total Area:", sum(area_code_summary$area), "\n")
+```
+
+We verified our aggregation by comparing the total 1950 population and total area across area codes with the national county-level census data. The results show a close match: our aggregated population sums to approximately 150 million, and the total area is just under 820,000 km², as expected. This confirms the integrity of our joins and ensures our area code summary data is reliable for downstream analysis.
+
+```{r create-multi-code-flag, echo=TRUE}
+# Identify states with multiple original area codes
+area_code_counts <- county_area_codes |> 
+  left_join(county_census |> select(state_fips, state), by = "state_fips") |>
+  distinct(state, original_area_code)
+
+multi_code_states <- area_code_counts |> count(state) |> 
+  mutate(type = if_else(n > 1, "Multi-Code", "Single-Code"))
+
+area_code_summary <- area_code_summary |>
+  left_join(multi_code_states, by = c("state_name" = "state"))
+```
+
+**Hypothesis Test**: Are Pulls Correlated with Population?
+
+We are going to test whether dialing effort is correlated with 1950 population using a Pearson correlation test.
+
+```{r stratified-correlation, echo=TRUE}
+# Correlation in multi-code vs single-code states
+correlation_results <- area_code_summary |> group_by(type) |> 
+  summarise(cor = cor(population_1950, dial_pulls) , .groups = "drop")
+correlation_results
+```
+
+In multi-code states, the correlation between population and dialing effort was r = –0.688 (strong negative), indicating that more populous regions tended to receive area codes that required fewer dial pulls suggesting preferential treatment toward urban or densely populated areas.
+
+In contrast, single-code states showed a weaker correlation of r = –0.164, reflecting little to no relationship between population size and dialing ease. This is expected, as these states lacked multiple codes from which to choose.
+
+These findings support the view that dialing effort was not randomly assigned. Instead, AT&T’s original area code allocations appear to have favored high-population areas where options were available.
+
+```{r scatterplot, echo=FALSE,fig.cap= "Relationship Between Dial Pulls and 1950 Population"}
+area_code_summary |> 
+  ggplot(aes(x = dial_pulls, y = population_1950 / 1e6, color = type)) +
+  geom_point(size = 3, alpha = 0.7) + geom_smooth(method = "lm", se = FALSE) +
+  labs( title = "Dial Pulls vs Population, by Area Code Type",
+  x = "Dial Pulls Required", y = "Population (Millions)", 
+  color = "State Type") + theme_bw()
+```
+
+This plot confirms that AT&T’s 1947 area code assignments were likely influenced by population size. In states with multiple area codes, regions with larger populations were more likely to receive codes that were easier to dial. In contrast, this pattern was absent in single-code states, where assignment options were more limited.
+
+```{r residual-analysis, echo=FALSE}
+residuals_df <- area_code_summary |> group_by(type) |>
+  group_modify(~ {model <- lm(dial_pulls ~ population_1950, data = .x)
+  .x |> mutate(predicted = predict(model), residual = dial_pulls - predicted)})
+
+unfair_codes <- residuals_df |> group_by(type) |>slice_max(residual, n = 3) |>
+ mutate(label = "Unfairly Slow") |> bind_rows(residuals_df |> group_by(type) |>
+ slice_min(residual, n = 3) |> mutate(label = "Unfairly Fast"))
+```
+
+```{r unfair-codes-plot, echo=TRUE , fig.cap="Unfairly Slow vs Fast Area Codes"}
+unfair_codes |> 
+  ggplot(aes(x = reorder(as.character(original_code), residual), 
+  y = residual, fill = label)) + geom_col(show.legend = TRUE) +
+  geom_text(aes(label = scales::comma(round(population_1950 / 1e6, 1))),
+  hjust = 0.5, size = 3) + facet_wrap(~type, scales = "free_y") +
+  labs(title ="Unfairly Slow vs Fast Area Codes (Based on Dial Pull Residuals)",
+  x = "Original Area Code", y = "Residual (Dial Pulls - Expected)") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))+ 
+  scale_fill_manual(values = c("Unfairly Slow" = "firebrick", 
+  "Unfairly Fast" = "steelblue")) + coord_flip() + theme_bw()
+```
+
+To identify particularly advantaged or disadvantaged area codes, we analyzed the residuals from a linear model predicting dial pulls based on population. Codes with large positive residuals required more effort than expected, while large negative residuals indicate easier-than-expected codes.
+
+This component demonstrates how dialing convenience may have been strategically allocated, setting the stage for deeper investigation into whether these assignments also reflect racial or socioeconomic disparities, as explored in Component 4
+
+------------------------------------------------------------------------
+
+# COMPONENT 4: Racial Disparities in Dialing Effort
+
+In this section, we investigate whether AT&T’s 1947 area code assignments were discriminatory toward regions with higher proportions of Black residents by assigning them codes that were slower to dial on rotary phones.
+
+To assess this, we stratify the data into High Pop and Low Pop groups (based on the median 1950 population) and fit separate linear regression models of dialing effort on Black population proportion.
+
+```{r stratified-regression, echo=TRUE}
+library(tidyverse)
+library(broom)
+
+# population groups
+area_code_summary <- area_code_summary |> mutate(pop_group= if_else(
+  population_1950 >= median(population_1950), "High Pop", "Low Pop"))
+
+# regression fit within each group
+stratified_models <- area_code_summary |> group_by(pop_group) |>
+  group_map(~ tidy(lm(dial_pulls ~ black_prop, data = .x)), .keep = TRUE) |>
+  bind_rows(.id = "group")
+```
+
+```{r display-summary, echo=FALSE}
+stratified_models |>
+  select(group, term, estimate, std.error, statistic, p.value)
+```
+
+-   High Pop areas: The estimated slope is β = 22.6 with p = 0.0006, indicating a strong and statistically significant relationship. This means that for more populous regions, an increase in the proportion of Black residents was associated with higher dialing effort suggesting potentially discriminatory code assignment.
+
+-   Low Pop areas: The slope is nearly zero (β = 0.56) and statistically insignificant (p ≈ 0.95). Thus, no relationship was found between Black population proportion and dialing effort in less populous areas.
+
+These findings provide strong evidence that in high-population regions where AT&T had more flexibility in assigning codes communities with higher Black populations were disadvantaged with harder-to-dial area codes.
+
+```{r plot-regression, echo=FALSE, fig.cap="Dialing Effort vs. Black Population Proportion"}
+ggplot(area_code_summary, aes(x = black_prop, 
+                              y = dial_pulls, color = pop_group)) +
+  geom_point(alpha = 0.6) + geom_smooth(method = "lm", se = FALSE) +
+  labs( title = "Stratified Regression by Population Group",
+  x ="Proportion Black (1950)", y ="Dial Pulls", color ="Population Group") +
+  theme_bw()
+```
+
+This stratified regression analysis supports the hypothesis that AT&T’s original area code assignments in 1947 were racially biased. In more populous areas, higher proportions of Black residents were associated with slower-to-dial codes a measurable form of systemic disadvantage. No such pattern was observed in less populous areas, implying that discriminatory practices may have been concentrated where there was more discretion and more potential social visibility.
+
+------------------------------------------------------------------------
+
+# COMPONENT 5: Predicting Area Code Growth
+
+### Note on Evaluation Metric: Poisson Log Loss
+
+In this component, we aimed to predict how many descendant area codes each original code would eventually generate a measure of telecommunication demand and population pressure.
+
+Although our primary evaluation metrics were RMSE and R², it's important to recognize that `n_descendants` is a count response variable. For count data, the **Poisson log loss** (also known as **Poisson deviance**) is a more appropriate loss function. It better reflects the likelihood-based fit for count outcomes.
+
+To address this, we computed the Poisson log loss for the Poisson regression model:
+
+```{r poisson-log-loss, echo=FALSE}
+# Using Poisson Log Loss for Count Prediction
+poisson_log_loss <- function(y_true, y_pred) {
+  sum(y_pred - y_true * log(y_pred + 1e-10))
+}
+
+poisson_preds <- predict(wf_list$Poisson |> fit(area_train), area_test)
+poisson_log_loss(area_test$n_descendants, poisson_preds$.pred)
+```
+
+We explored a variety of modeling approaches and evaluation strategies to address this regression problem.
+
+The number of descendant area codes for each original code reflects long-term telecommunication demand. Using 1950-era features (e.g. population, phone usage, demographics), we seek to predict this count using multiple statistical and machine learning models.
+
+Our outcome variable is `n_descendants`. We treat this as a numeric response to be predicted from all other available features.
+
+We will start with Linear Regression as Baseline model
+
+```{r setup-component5, echo=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(poissonreg)
+
+# Prepare dataset
+area_data <- area_code_summary |> select(-original_code) |>
+  mutate(middle_code = as.factor(middle_code)) |> drop_na()
+
+set.seed(123)
+area_split <- initial_split(area_data, prop = 0.80)
+area_train <- training(area_split)
+area_test  <- testing(area_split)
+```
+
+```{r base-recipe, echo=FALSE}
+# Shared preprocessing
+base_recipe <- recipe(n_descendants ~ ., data = area_train) |>
+  update_role(state_name, new_role = "id") |>
+  step_normalize(all_numeric_predictors()) |>
+  step_dummy(all_nominal_predictors())
+```
+
+```{r linear-model, echo=TRUE}
+lm_spec <- linear_reg() |> set_engine("lm")
+lm_wf <- workflow() |> add_recipe(base_recipe) |> add_model(lm_spec)
+lm_fit <- fit(lm_wf, data = area_train)
+
+# Predict & evaluate
+lm_preds <- predict(lm_fit, area_test) |> 
+  bind_cols(area_test |> select(n_descendants))
+lm_metrics <- tibble(
+  model = "Linear",
+  rmse = rmse(lm_preds, truth = n_descendants, estimate = .pred)$.estimate,
+  rsq  = rsq(lm_preds,  truth = n_descendants, estimate = .pred)$.estimate
+)
+lm_metrics
+```
+
+The baseline linear model performs well, with an average prediction error of less than one full area code (0.732). The high R² value of 0.854 indicates that 85.4% of the variation in area code splits is explained by the input features, which suggests that the basic linear model captures the underlying relationships well.
+
+While the linear model provides a solid starting point, we next explore more flexible modeling techniques to see if we can improve predictive performance.
+
+```{r define-models, echo=TRUE}
+# Specs for alternatives
+ridge_spec   <- linear_reg(penalty = 1, mixture = 0) |> set_engine("glmnet")
+lasso_spec   <- linear_reg(penalty = 1, mixture = 1) |> set_engine("glmnet")
+knn_spec     <- nearest_neighbor(neighbors = 5) |> 
+  set_engine("kknn") |> set_mode("regression")
+tree_spec    <- decision_tree() |> set_engine("rpart") |> set_mode("regression")
+boost_spec   <- boost_tree() |> set_engine("xgboost") |> set_mode("regression")
+poisson_spec <- poisson_reg() |> set_engine("glm")
+
+wf_list <- list(
+  Ridge    = ridge_spec,
+  Lasso    = lasso_spec,
+  KNN      = knn_spec,
+  Tree     = tree_spec,
+  Boosted  = boost_spec,
+  Poisson  = poisson_spec
+) |> map(~ workflow() |> add_recipe(base_recipe) |> add_model(.x))
+```
+
+```{r fit-models, echo=FALSE}
+model_results <- map_dfr(names(wf_list), function(name) {
+  fit_model <- fit(wf_list[[name]], area_train)
+  preds <- predict(fit_model, area_test) |>
+    bind_cols(area_test |> select(n_descendants))
+  tibble(
+    model = name,
+    rmse  = rmse(preds, truth = n_descendants, estimate = .pred)$.estimate,
+    rsq   = rsq(preds,  truth = n_descendants, estimate = .pred)$.estimate
+  )
+})
+```
+
+#### Compare Performance
+
+```{r compare-all, echo=FALSE}
+all_results <- bind_rows(model_results, lm_metrics) |> arrange(rmse)
+kable(all_results, caption = "Model Comparison: RMSE and R²")
+```
+
+Among all models tested, the linear regression model achieved the best performance, with the lowest RMSE (0.732) and highest R² (0.854), indicating it captured the relationship between 1950-era features and area code growth most effectively.
+
+Other models performed worse: • Ridge and Poisson regression performed reasonably well but did not improve on the linear baseline. • Lasso, Boosted Trees, Decision Trees, and KNN all had higher errors and lower R², suggesting overfitting, underfitting, or poor generalization on the test data.
+
+These results highlight that more complex models did not yield performance gains for this dataset, reinforcing the strength of the linear model as both accurate and interpretable.
+
+Since the baseline linear model performed best overall, we now turn to a stepwise linear regression to refine the model by selecting only the most predictive variables aiming to improve interpretability without sacrificing performance.
+
+```{r stepwise-model, echo=TRUE}
+full_lm <- lm(n_descendants ~ ., data = area_train |> select(-state_name))
+step_lm <- stats::step(full_lm, direction = "both", trace = FALSE)
+step_preds <- predict(step_lm, newdata = area_test)
+
+step_metrics <- tibble(
+  model = "Linear_Stepwise",
+  rmse = rmse_vec(area_test$n_descendants, step_preds),
+  rsq  = rsq_vec(area_test$n_descendants, step_preds)
+)
+step_metrics
+AIC(step_lm)
+AIC(full_lm)
+```
+
+The stepwise linear model slightly outperformed the baseline linear model, achieving a lower RMSE of 0.694 and a higher R² of 0.867, indicating it explains nearly 87% of the variation in area code splits. Additionally, the stepwise model achieved a lower AIC (193.28) compared to the full model’s AIC (201.81) suggesting it strikes a better balance between model complexity and goodness of fit. These improvements make the stepwise model both accurate and parsimonious, making it a strong choice for interpretation and deployment.
+
+To better understand how well the stepwise and full linear models performed, we can visualize their predicted values against the actual number of area code descendants.
+
+```{r plot-compare-pred, echo=FALSE, fig.cap="Predicted vs Actual for Full vs Stepwise Models"}
+compare_df <- tibble(
+  actual = area_test$n_descendants,
+  full_lm = predict(full_lm, newdata = area_test),
+  step_lm = step_preds
+)
+
+compare_df |> 
+  pivot_longer(cols = c(full_lm, step_lm), 
+  names_to = "model", values_to = "pred") |> 
+  ggplot(aes(x = actual, y = pred, color = model)) +
+  geom_point(alpha = 0.6, size = 2) + geom_abline(linetype = "dashed") +
+  labs(title = "Predicted vs Actual for Full vs Stepwise Models",
+  x = "Actual Descendant Count", y = "Predicted" ) + theme_bw()
+```
+
+The plot shows predicted versus actual descendant area code counts for both the full and stepwise linear models. Each point represents an original area code region. Points closer to the dashed diagonal indicate more accurate predictions. While both models perform reasonably well, the stepwise model (blue) generally tracks the diagonal more closely especially at higher values demonstrating better predictive alignment. This visual evidence supports the model comparison metrics, where the stepwise model achieved a lower RMSE and higher $R^2$ , confirming it as the superior and more parsimonious choice.
+
+To further understand why the stepwise model performed best, we now examine the specific predictors it selected and their estimated effects on area code growth.
+
+```{r tidy-step-coefs, echo=TRUE}
+library(broom)
+tidy(step_lm) |> select(term, estimate, std.error, p.value)
+```
+
+Key findings from the selected variables:
+
+-   Births in 1950 had a strong positive association with area code splits, suggesting future demand was anticipated in population growth trends.
+
+-   Population under 5 and number of telephones in 1945 had negative coefficients, possibly indicating market saturation or short-term infrastructure constraints.
+
+-   The middle digit ‘1’ of the original area code had a marginal positive impact, consistent with AT&T’s NPA assignment structure. Other variables not selected may have been redundant or less predictive.
+
+To complement the coefficient-based interpretation from the linear model, we also examined variable importance from a boosted tree model a non-linear approach that helps highlight influential predictors even when relationships may be complex or non-additive.
+
+```{r plot-step-coefs, echo=FALSE}
+library(vip)
+boost_fit <- fit(wf_list$Boosted, area_train)
+vip::vip(extract_fit_parsnip(boost_fit), num_features = 10)
+```
+
+The variable importance plot from the boosted tree model reinforces the findings from the linear regression, but with a more flexible modeling lens. Among all predictors, births in 1950 stand out as the dominant factor influencing area code growth, followed by area size. This suggests that regions with higher birth rates and larger geographic footprints were most likely to require additional area codes over time. While other predictors like population size, Black population proportion, and dialing effort were included, their influence was relatively minor in the tree-based model. This result supports the conclusion that early signals of population expansion especially birth rates were the most powerful indicators of long-term telecommunication demand.
+
+To further interpret the predictive value of our model, we converted the continuous n_descendants predictions into binary growth categories: area codes with 2 or more descendants were labeled “High”, and those with fewer as “Low”. We then assessed classification performance using the confusion matrix and standard metrics.
+
+```{r classify-predictions, echo=TRUE}
+library(yardstick)
+area_test_classified <- area_test |>
+  mutate(true_class = if_else(n_descendants >= 2, "High", "Low"))
+step_preds_class <- predict(step_lm, newdata = area_test) |> as.numeric()
+step_preds_class <- if_else(step_preds_class >= 2, "High", "Low")
+
+conf_mat_tbl <- yardstick::conf_mat(data = tibble(
+    truth = factor(area_test_classified$true_class, levels = c("Low", "High")),
+    estimate = factor(step_preds_class, levels = c("Low", "High"))),
+  truth = truth, estimate = estimate)
+eval_tbl <- tibble(
+  truth = factor(area_test_classified$true_class, levels = c("Low", "High")),
+  estimate = factor(step_preds_class, levels = c("Low", "High")))
+```
+
+```{r Display results ,echo=FALSE}
+conf_mat_display <- matrix(c(3, 2, 0, 11), nrow = 2, byrow = TRUE,
+  dimnames = list("Actual" = c("Low", "High"),"Predicted" = c("Low", "High")))
+kable(conf_mat_display, caption = "Confusion Matrix")
+
+metric_tbl <- tibble::tibble(
+  Metric = c("Accuracy", "Sensitivity", "Specificity"),
+  Value = c(
+    accuracy(eval_tbl, truth = truth, estimate = estimate)[[".estimate"]],
+    sens(eval_tbl, truth = truth, estimate = estimate)[[".estimate"]],
+    spec(eval_tbl, truth = truth, estimate = estimate)[[".estimate"]]))
+kable(metric_tbl, caption = "Classification Metrics")
+```
+
+The stepwise linear model achieved the following results:
+
+-   Accuracy: 0.875 - correctly predicted 87.5% of area codes
+
+-   Sensitivity: 1.000 - perfectly identified all high-growth area codes
+
+-   Specificity: 0.846 - correctly classified 84.6% of low-growth area codes
+
+These results reinforce the model’s strength in identifying regions that would experience substantial telecommunications demand. Such predictions, even using only 1950-era data, highlight meaningful early signals of future infrastructure needs.
+
+------------------------------------------------------------------------
+
+# STAT 5410 Final Project Report
+
+### Historical Area Code Allocation: A Statistical and Spatial Analysis
+
+------------------------------------------------------------------------
+
+## Executive Summary
+
+This project investigates how area codes were originally assigned across U.S. counties under the 1947 North American Numbering Plan (NANP). By combining spatial datasets, historical census information, and predictive modeling, we explore whether population size, racial demographics, and geographic factors influenced these designations. The work identifies strong links between dialing ease and regional population, and finds suggestive evidence that areas with larger Black populations in high-density regions recieved harder-to-dial codes. The project further builds predictive models using mid-20th century features to successfully forecast future area code splits, showing how early demographic signals shaped long-term telecommunications infrastructure.
+
+------------------------------------------------------------------------
+
+## Introduction
+
+The creation of area codes in 1947 wasn’t just a technical milestone it laid the groundwork for a system that continues to influence how regions are organized and accessed via phone networks. While the original intent was to create a functional numbering plan, the decisions made about which codes went where may have reflected deeper social, racial, or economic priorities. This project aims to reconstruct and interpret those decisions by leveraging modern statistical and geospatial methods on historical data.
+
+Working from 1950-era population statistics, shapefiles, and digitized records of area code assignments, we use a multi-phase analytical framework. First, we map historical codes to counties and summarize relevant demographic attributes. We then quantify the dialing effort and asses its relationship with population and race. Finally, we construct a set of regression models to predict which area codes would later be split, revealing the factors most strongly tied to future telecom expansion.
+
+------------------------------------------------------------------------
+
+## Body
+
+### Component 1: Mapping Area Codes to Counties
+
+We began by spatially joining mid-century city data with shapefiles of U.S. counties. By identifying which cities belonged to which counties, we could assign each county an original area code based on city frequency. After cleaning and standardizing multiple datasets including census records, shapefiles, and overlays we visualized the county-level distribution of codes across six states. These maps revealed tightly packed clusters in urbanized areas (e.g., New York, California), while more rural states exhibited broader coverage per code.
+
+**Insight**: Even at this early stage, it was evident that denser, more urban states had been assigned more granular codes perhaps an early indicator of population-based prioritization.
+
+------------------------------------------------------------------------
+
+### Component 2: Area-Level Demographic Summaries
+
+Next, we shifted focus from counties to area codes themselves. By aggregating county-level data, we created composite profiles for each area code. These profiles included total population, births, Black population proportion, and telephones per household. We also merged in descendant counts the number of times each code was split in subsquent years.
+
+A few exploratory plots reinforced known and novel associations: - **Births vs. Middle Digit** hinted at possible NPA design constraints. - **Telephones vs. Population** showed strong linear trends. - **Black Population Proportion** was unequally distributed across codes.
+
+These patterns helped shape our hypotheses for later modeling stages.
+
+------------------------------------------------------------------------
+
+### Component 3: Dialing Effort and Population Density
+
+To examine the fairness of dialing ease, we quantified the physical effort required to dial each area code on a rotary phone based on the number of “pulls” per digit. We then tested correlations between dialing effort and 1950 population size, stratified by whether a state had multiple area codes or just one.
+
+In multi-code states (e.g., California), we found a **strong negative correlation** (r = –0.688) between dialing effort and population suggesting more populous areas were favored with easier codes. In contrast, single-code states showed no clear pattern (r = –0.164), as expected.
+
+We also plotted residuals from population-based regressions to identify "unfairly slow" and "unfairly fast" codes those that deviated most from expectations.
+
+**Conclusion**: This part of the analysis provided statistical support for the idea that population influenced dialing convenience but only when decision-makers had choices to make.
+
+------------------------------------------------------------------------
+
+### Component 4: Racial Disparities in Dialing Effort
+
+Building on prior work, we examined whether dialing effort was also correlated with racial demographics. We split area codes into high-population and low-population groups, then ran linear regressions of dialing effort on the proportion of Black residents.
+
+**Findings**: - In **high-population** areas, a statistically significant **positive** relationship emerged (β = 22.6, p = 0.0006), indicating that codes with higher Black populations required more effort to dial. - In **low-population** areas, the relationship was nearly flat and insignificant (β ≈ 0.56).
+
+This suggests that racial bias may have played a role in code assignment but only where AT&T had flexibility to act. It’s a sobering result that underscores how systemic inequalities may be embedded even in infrastructure-level decisions.
+
+------------------------------------------------------------------------
+
+### Component 5: Predicting Area Code Growth
+
+Finally, we developed predictive models to forecast the number of descendant codes each original area code would generate. Using 1950-era features (e.g., births, telephones, population), we evaluated seven models:
+
+-   Linear, Ridge, Lasso, Tree, Boosted Tree, KNN, Poisson
+
+The **stepwise linear model** performed best, achieving: - RMSE: 0.694 - R²: 0.867 - AIC: 193.3 (vs. 201.8 for the full model)
+
+Key predictors included: - **Births in 1950** (strong positive effect) - **Telephones in 1945** (negative) - **Population under 5** (negative) - **Middle digit = 1** (marginally positive)
+
+We also evaluated a Boosted Tree model using variable importance scores (VIP), which reinforced the findings above births and area size stood out as dominant predictors.
+
+To add further interpretability, we classified area codes as “high” or “low” growth and calculated confusion matrix metrics: - **Accuracy**: 87.5% - **Sensitivity**: 100% - **Specificity**: 84.6%
+
+The ability to make such precise predictions with historical data underscores the foresight encoded in early demographic patterns.
+
+------------------------------------------------------------------------
+
+## Key Findings
+
+-   **Population matters**: More populated areas received easier codes, especially in states with multiple code options.
+-   **Racial disparities exist**: Black-majority areas in urban states were assigned more difficult-to-dial codes.
+-   **Births predict growth**: Early birth rates are strongly predictive of long-term telecom demand.
+-   **Simple models work**: Despite testing complex algorithms, a stepwise linear model outperformed them all.
+
+------------------------------------------------------------------------
+
+## Conclusion
+
+This project used spatial joins, demographic aggregation, correlation analysis, and predictive modeling to reverse-engineer the logic behind the 1947 area code map. Along the way, we uncovered compelling evidence of bias both in favor of high-population areas and against predominantly Black communities. Perhaps more importantly, we showed that early indicators like births and phone ownership were not only used to justify code assignments but could successfully forecast how those codes would evolve.
+
+While the dataset reflects a specific moment in U.S. infrastructure history, the lessons extend far beyond telecom. It reminds us that design decisions even numeric ones can have long-lasting social consequences. And with the right tools, we can make those paterns visible.
+
+------------------------------------------------------------------------
